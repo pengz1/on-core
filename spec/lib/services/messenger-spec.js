@@ -3,10 +3,13 @@
 
 'use strict';
 
+var nock = require('nock');
+
 describe('Messenger', function () {
     var Errors, ErrorEvent, IpAddress, Constants,
         testData = { hello: 'world' },
-        sandbox = sinon.sandbox.create();
+        sandbox = sinon.sandbox.create(),
+        configuration;
     
     helper.before(function(context) {
         function MockPromise () {
@@ -28,7 +31,7 @@ describe('Messenger', function () {
                 callback();
             })
         };
-        
+       
         context.statsd = {
             stop: sandbox.stub().resolves(),
             start: sandbox.stub().resolves(),
@@ -86,6 +89,7 @@ describe('Messenger', function () {
         ErrorEvent = helper.injector.get('ErrorEvent');
         IpAddress = helper.injector.get('IpAddress');
         Constants = helper.injector.get('Constants');
+        configuration = helper.injector.get('Services.Configuration');
     });
     
     helper.after();
@@ -201,6 +205,91 @@ describe('Messenger', function () {
                 'test',
                 { hello: 'world' }
             ).should.be.rejectedWith(Error);
+        });
+
+        describe("publish with user url feature", function(){
+            var payload, http, httpSpy, https, httpsSpy;
+            before("Before user url test", function(){
+                payload = JSON.stringify({routingKey: 'test', data: { hello: 'world' }});
+                http = require('http');
+                https = require('https');
+                configuration.set('userEventUrlList', ['http://172.1.1.1:8080/test']);
+                httpSpy  = sinon.spy(http, 'request');
+                httpsSpy  = sinon.spy(https, 'request');
+            });
+            
+            afterEach("After each user url test", function(){
+                httpSpy.reset();
+                httpsSpy.reset();
+            });
+            
+            it('should post data to user url if flag is set', function () {
+                var scope = nock('http://172.1.1.1:8080')
+                            .filteringRequestBody(function(body){
+                                if (!_.isEqual(payload, body)) {
+                                    throw new Error('body is not mathed')
+                                }
+                            })
+                            .post('/test')
+                            .reply(201, 'OK');
+                return this.subject.publish(
+                    Constants.Protocol.Exchanges.Test.Name,
+                    'test',
+                    { hello: 'world' },
+                    {postDataToUrl: true}
+                ).then(function(){
+                    expect(http.request).to.have.been.calledOnce;
+                    expect(https.request).to.have.not.been.called;
+                    nock.removeInterceptor(scope);
+                });
+            });
+            
+            it('should not post data to user url if flag is not set', function () {
+                return this.subject.publish(
+                    Constants.Protocol.Exchanges.Test.Name,
+                    'test',
+                    { hello: 'world' }
+                ).then(function(){
+                    expect(http.request).to.have.not.been.called;
+                    expect(https.request).to.have.not.been.called;
+                });
+            });
+
+            it('should post data to user url if flag is set', function () {
+                var scope = nock('https://172.1.1.1:8080')
+                            .filteringRequestBody(function(body){
+                                if (!_.isEqual(payload, body)) {
+                                    throw new Error('body is not mathed')
+                                }
+                            })
+                            .post('/test')
+                            .reply(201, 'OK');
+                configuration.set('userEventUrlList', ['https://172.1.1.1:8080/test']);
+                return this.subject.publish(
+                    Constants.Protocol.Exchanges.Test.Name,
+                    'test',
+                    { hello: 'world' },
+                    {postDataToUrl: true}
+                ).then(function(){
+                    expect(https.request).to.have.been.calledOnce;
+                    expect(http.request).to.have.not.been.called;
+                    nock.removeInterceptor(scope);
+                });
+            });
+
+            it('should post data to user url if user url is empty', function () {
+                configuration.load();
+                configuration.set('userEventUrlList', []);
+                return this.subject.publish(
+                    Constants.Protocol.Exchanges.Test.Name,
+                    'test',
+                    { hello: 'world' },
+                    {postDataToUrl: true}
+                ).then(function(){
+                    expect(http.request).to.have.not.been.called;
+                    expect(https.request).to.have.not.been.called;
+                });
+            });
         });
     });
 

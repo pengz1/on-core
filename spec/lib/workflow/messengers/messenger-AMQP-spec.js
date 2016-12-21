@@ -2,6 +2,8 @@
 
 'use strict';
 
+var url = require('url');
+var http = require('http');
 describe('Task/TaskGraph AMQP messenger plugin', function () {
     var taskProtocol;
     var eventsProtocol;
@@ -157,16 +159,19 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
     describe('Graph progress update', function() {
         var graphId = uuid.v4(),
             taskId = uuid.v4(),
+            nodeId = uuid.v4(),
             _progressData,
             progressData,
             graphObject = {
             definition: {friendlyName: 'Test graph'},
-            tasks: {}
+            tasks: {},
+            node: nodeId
         };
 
         beforeEach(function() {
             progressData = {
                 graphId: graphId,
+                nodeId: nodeId,
                 graphName: "Test graph",
                 progress: {
                     description: "task completed",
@@ -187,9 +192,10 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
             graphObject.tasks[taskId] = {friendlyName: "test task"};
         });
         
-        afterEach(function(){
-            waterline.graphobjects.findOne.reset();
-        });
+        //afterEach(function(){
+            //console.log("----------------------------");
+            //waterline.graphobjects.findOne.reset();
+        //});
 
         it('should update graph progress normally', function(){
             progressData.taskProgress.progress.percentage = 'any';
@@ -209,6 +215,7 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
         });
 
         it('should update graph progress and calculate percentage number', function(){
+            waterline.graphobjects.findOne.reset();
             _progressData = _.omit(_progressData, ['graphName', 'graphId']);
             _progressData.progress.maximum = '3';
             delete _progressData.taskProgress.taskId;
@@ -230,6 +237,7 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
         });
 
         it('should graph progress with percentage Not Available', function(){
+            waterline.graphobjects.findOne.reset();
             _progressData.progress.maximum = null;
             delete _progressData.taskProgress.taskName;
             progressData.progress.maximum = null;
@@ -246,6 +254,7 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
         });
 
         it('should graph progress without taskProgress', function(){
+            waterline.graphobjects.findOne.reset();
             delete _progressData.taskProgress;
             delete progressData.taskProgress;
             progressData.progress.percentage = '50%';
@@ -258,6 +267,7 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
         });
 
         it('should graph progress without taskName and graphName', function(){
+            waterline.graphobjects.findOne.reset();
             delete _progressData.taskProgress.taskName;
             delete _progressData.graphName;
             delete progressData.taskProgress.taskName;
