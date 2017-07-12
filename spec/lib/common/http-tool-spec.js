@@ -3,12 +3,12 @@
 
 'use strict';
 var nock = require('nock');
+var ping = require('ping');
 
 describe("HttpTool", function(){
-    var httpTool;
+    var httpTool, HttpTool;
     var siteGen = 'http://mysite.emc.com';
     var requestSettings = {};
-    
 
     before(function(){
         helper.setupInjector(
@@ -16,7 +16,7 @@ describe("HttpTool", function(){
                 helper.require('/lib/common/http-tool.js')
             ])
         );
-        var HttpTool = helper.injector.get('HttpTool');
+        HttpTool = helper.injector.get('HttpTool');
         httpTool = new HttpTool();
     });
 
@@ -185,6 +185,48 @@ describe("HttpTool", function(){
         })
         .then(function(data){
             expect(data).to.have.property('httpStatusCode').to.equal(304);
+        });
+    });
+
+    it('should ping given IP without arguments', function(){
+        sinon.stub(ping.promise, 'probe').resolves({alive: true});
+        return httpTool.ping('10.1.1.1')
+        .then(function(res){
+            expect(ping.promise.probe).to.be.calledWith(
+                '10.1.1.1',
+                {
+                    timeout: 1
+                }
+            );
+            expect(res.alive).to.be.equal(true);
+        });
+    });
+
+    it('should ping given IP with argument', function(){
+        ping.promise.probe.reset();
+        return httpTool.ping('10.1.1.1', 2000, ['-i 2'])
+        .then(function(){
+            expect(ping.promise.probe).to.be.calledWith(
+                '10.1.1.1',
+                {
+                    timeout: 2,
+                    extra: ['-i 2']
+                }
+            );
+        });
+    });
+
+    it('should report host is not alive error', function (done) {
+        ping.promise.probe.restore();
+        sinon.stub(ping.promise, 'probe').resolves({alive: false});
+        var host = '172.1.1.1';
+        return httpTool.validateConnection(host)
+        .then(function(){
+            done(new Error('Test should fail'));
+        })
+        .catch(function(err){
+            expect(err.message).to.equal('Host %s is not alive'.format(host));
+            done();
         });
     });
 });
