@@ -1,4 +1,4 @@
-# Copyright 2016, EMC, Inc. 
+# Copyright 2016, EMC, Inc.
 ARG repo=nodesource
 ARG tag=4.4.6
 
