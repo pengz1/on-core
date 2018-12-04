@@ -14,8 +14,6 @@ some services to be available and running locally:
  - mongodb
 
 `./HWIMO-TEST` will run local tests, and was built for running on a jenkins build slave, and will run the tests, jshint, and code coverage all together.
-
-
 # Configuration
 
 The following configuration values can be overridden via the environment, command line, or via the global configuration file located at /opt/monorail/config.json.
