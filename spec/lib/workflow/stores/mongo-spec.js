@@ -27,6 +27,7 @@ describe('Task Graph mongo store interface', function () {
             mongo: { objectId: sinon.stub() }
         };
     };
+
     var waterlineMock = {
         graphobjects: createMockModel(),
         taskdependencies: createMockModel(),
@@ -34,19 +35,28 @@ describe('Task Graph mongo store interface', function () {
         graphdefinitions: createMockModel()
     };
 
-    before(function() {
+    var makeDatabase = function(waterlineConfig){
         helper.setupInjector([
             helper.require('/lib/workflow/stores/mongo'),
-            helper.di.simpleWrapper(waterlineMock, 'Services.Waterline')
+            helper.di.simpleWrapper(waterlineConfig, 'Services.Waterline')
         ]);
         mongo = helper.injector.get('TaskGraph.Stores.Mongo');
         waterline = helper.injector.get('Services.Waterline');
+    };
+
+    var resetInjections = function(){
+        makeDatabase(waterlineMock);
         Constants = helper.injector.get('Constants');
         Errors = helper.injector.get('Errors');
         uuid = helper.injector.get('uuid');
+    };
+
+    before(function() {
+        resetInjections();
     });
 
     afterEach(function() {
+        resetInjections();
         _.forEach(waterline, function(model) {
             _.forEach(model, function(method) {
                 if (method.reset) {
@@ -323,6 +333,28 @@ describe('Task Graph mongo store interface', function () {
         });
     });
 
+    it('getTaskById should return undefined when graph not found', function(){
+        var task1 = uuid.v4();
+
+        var data = {
+            taskId: task1,
+            graphId: uuid.v4()
+        };
+        waterline.graphobjects.findOne.resolves(undefined);
+
+        return mongo.getTaskById(data)
+        .then(function(result) {
+            expect(waterline.graphobjects.findOne).to.have.been.calledOnce;
+            var fields = { fields: { _id: 0, instanceId: 1, context: 1, tasks: {} } };
+            fields.fields.tasks[task1] = 1;
+            expect(waterline.graphobjects.findOne).to.have.been.calledWith(
+                { instanceId: data.graphId },
+                fields
+            );
+            expect(result).to.equal(undefined);
+        });
+    });
+
     it('heartbeatTasksForRunner', function() {
         var leaseId = uuid.v4();
 
@@ -486,14 +518,16 @@ describe('Task Graph mongo store interface', function () {
 
     it('checkGraphSucceeded not succeeded', function() {
         var data = {
-            graphId: uuid.v4()
+            graphId: uuid.v4(),
+            terminalOnStates: ['failed'],
+            state: 'failed'
         };
-        waterline.taskdependencies.findOne.resolves(data);
+        waterline.taskdependencies.find.resolves([data]);
 
         return mongo.checkGraphSucceeded(data)
         .then(function(result) {
-            expect(waterline.taskdependencies.findOne).to.have.been.calledOnce;
-            expect(waterline.taskdependencies.findOne).to.have.been.calledWith(
+            expect(waterline.taskdependencies.find).to.have.been.calledOnce;
+            expect(waterline.taskdependencies.find).to.have.been.calledWith(
                 {
                     graphId: data.graphId,
                     state: { $ne: Constants.Task.States.Succeeded },
@@ -503,7 +537,9 @@ describe('Task Graph mongo store interface', function () {
             );
             expect(result).to.deep.equal({
                 graphId: data.graphId,
-                done: false
+                done: false,
+                terminalOnStates: ['failed'],
+                state: 'failed'
             });
         });
     });
@@ -512,14 +548,56 @@ describe('Task Graph mongo store interface', function () {
         var data = {
             graphId: uuid.v4()
         };
-        waterline.taskdependencies.findOne.resolves(null);
+        waterline.taskdependencies.find.resolves([]);
         return expect(mongo.checkGraphSucceeded(data)).to.become({
             graphId: data.graphId,
             done: true
         });
     });
 
-    it('updateDependentTasks', function() {
+    it('checkGraphSucceeded should finish with nonterminal, handled tasks', function() {
+        var graphId = uuid.v4();
+        var data = [
+            {
+                graphId: graphId,
+                terminalOnStates: ['succeded', 'cancelled', 'timeout'],
+                state: 'failed'
+            },
+            {
+                graphId: graphId,
+                terminalOnStates: ['succeded', 'cancelled', 'failed'],
+                state: 'timeout'
+            },
+            {
+                graphId: graphId,
+                terminalOnStates: ['succeded','timeout', 'failed'],
+                state: 'cancelled'
+            },
+            {
+                graphId: graphId,
+                terminalOnStates: ['succeeded'],
+                state: 'failed'
+            }
+        ];
+        waterline.taskdependencies.find.resolves(data);
+
+        return mongo.checkGraphSucceeded(data[0])
+        .then(function(result) {
+            expect(waterline.taskdependencies.find).to.have.been.calledOnce;
+            expect(waterline.taskdependencies.find).to.have.been.calledWith(
+                {
+                    graphId: graphId,
+                    state: { $ne: Constants.Task.States.Succeeded },
+                    ignoreFailure: { $ne: true },
+                    reachable: true
+                }
+            );
+            expect(result).to.have.property('graphId').that.equals(graphId);
+            expect(result).to.have.property('done').that.equals(true);
+        });
+    });
+
+    it('updates dependent tasks', function() {
         var data = {
             state: 'succeeded',
             taskId: uuid.v4(),
@@ -535,41 +613,203 @@ describe('Task Graph mongo store interface', function () {
             query['dependencies.' + data.taskId] = {
                 $in: [data.state, Constants.Task.States.Finished]
             };
+
             var update = {
                 $unset: {}
             };
             update.$unset['dependencies.' + data.taskId] = '';
-            expect(waterline.taskdependencies.updateMongo).to.have.been.calledOnce;
+            expect(waterline.taskdependencies.updateMongo).to.have.been.calledTwice;
             expect(waterline.taskdependencies.updateMongo).to.have.been.calledWith(
                 query, update, { multi: true }
             );
         });
     });
 
-    it('updateUnreachableTasks', function() {
+    it('updates dependent tasks under anyOf key', function() {
+        var waterlineUnderAnyOf = {
+            taskdependencies:{
+                find: sinon.stub().resolves([]),
+                updateMongo: sinon.stub().resolves()
+            }
+        };
+       
+        makeDatabase(waterlineUnderAnyOf);
+        
         var data = {
             state: 'succeeded',
             taskId: uuid.v4(),
             graphId: uuid.v4()
         };
 
-        var query = {
+        return mongo.updateDependentTasks(data)
+        .then(function() {
+            var query = {
+                graphId: data.graphId,
+                reachable: true
+            };
+
+            query['dependencies.anyOf.' + data.taskId] = {
+                $in: [data.state, Constants.Task.States.Finished]
+            };
+
+            var updateAny = {
+                $unset:{}
+            };
+            updateAny.$unset['dependencies.anyOf'] = "";
+
+            expect(waterline.taskdependencies.updateMongo).to.have.been.calledTwice;
+            expect(waterline.taskdependencies.updateMongo).to.have.been.calledWith(
+                query, updateAny, {multi: true});
+        });
+    });
+
+    var setupWaterlineDependency = function(dependentTask) {
+         var waterlineWithDep = {
+            taskdependencies:{
+                find: sinon.stub().resolves([dependentTask]),
+                updateMongo: sinon.stub().resolves()
+            }
+        };
+
+        makeDatabase(waterlineWithDep); 
+    };
+
+    it('updates unreachable tasks under dependencies', function() {
+        var data = {
+            state: 'succeeded',
+            taskId: uuid.v4(),
+            graphId: uuid.v4()
+        };       
+        
+        var dependentTask = {
+            taskId: uuid.v4(),
+            dependencies:{}
+        };
+        dependentTask.dependencies[data.taskId] = 'failed';
+
+        setupWaterlineDependency(dependentTask);
+ 
+        var queryUpdate = {
+            $or: [{taskId: dependentTask.taskId}],
             graphId: data.graphId,
             reachable: true
-        };
-        query['dependencies.' + data.taskId] = {
-            $in: _.difference(Constants.Task.FinishedStates, [data.state])
         };
 
         return mongo.updateUnreachableTasks(data)
         .then(function() {
-            expect(waterline.taskdependencies.updateMongo).to.have.been.calledOnce;
+            expect(waterline.taskdependencies.find).to.have.been.calledOnce;
             expect(waterline.taskdependencies.updateMongo).to.have.been.calledWith(
-                query,
-                { $set: { reachable: false } },
-                { multi: true }
-            );
+                queryUpdate,
+                {$set: { reachable: false }},
+                {multi: true}
+            ); 
         });
+    });
+
+    it('updates tasks dependent list when one task under anyOf failed', function(){
+        var data = {
+            state: 'succeeded',
+            taskId: uuid.v4(),
+            graphId: uuid.v4()
+        };       
+        
+        var dependentTask = {
+            taskId: uuid.v4(),
+            dependencies:{
+                anyOf:{}
+            }
+        };
+        dependentTask.dependencies.anyOf[data.taskId] = 'failed';
+        dependentTask.dependencies.anyOf[uuid.v4()] = 'succeeded';
+
+        var queryFind = {
+            graphId: data.graphId,
+            reachable: true,
+            $or:[{},{}]
+        };
+        queryFind.$or[0]['dependencies.' + data.taskId] = {
+            $in: _.difference(Constants.Task.FinishedStates, [data.state])
+        };
+        queryFind.$or[1]['dependencies.anyOf' + data.taskId] = {
+            $in: _.difference(Constants.Task.FinishedStates, [data.state])
+        };       
+       
+        setupWaterlineDependency(dependentTask); 
+        
+        var updateQuery = {
+            $or: [{taskId: dependentTask.taskId}],
+            graphId: data.graphId,
+            reachable: true
+        };        
+
+        var dbUpdate = {
+            $unset: {}
+        };
+        dbUpdate.$unset["dependencies.anyOf." + data.taskId] = "";
+
+        return mongo.updateUnreachableTasks(data)
+        .then(function() {
+            expect(waterline.taskdependencies.find).to.have.been.calledOnce;
+            expect(waterline.taskdependencies.find).to.have.been.calledWith(queryFind);
+            expect(waterline.taskdependencies.updateMongo).to.have.been.calledWith(
+                updateQuery,
+                dbUpdate,
+                {multi: true}
+            ); 
+        });
+    });
+
+    it('marks task unreachable when all tasks under anyOf faild', function(){
+        var data = {
+            state: 'succeeded',
+            taskId: uuid.v4(),
+            graphId: uuid.v4()
+        };       
+        
+        var dependentTask = {
+            taskId: uuid.v4(),
+            dependencies:{
+                anyOf:{}
+            }
+        };
+        dependentTask.dependencies.anyOf[data.taskId] = 'failed';
+
+        var queryFind = {
+            graphId: data.graphId,
+            reachable: true,
+            $or:[{},{}]
+        };
+        queryFind.$or[0]['dependencies.' + data.taskId] = {
+            $in: _.difference(Constants.Task.FinishedStates, [data.state])
+        };
+        queryFind.$or[1]['dependencies.anyOf' + data.taskId] = {
+            $in: _.difference(Constants.Task.FinishedStates, [data.state])
+        };       
+
+        setupWaterlineDependency(dependentTask);       
+
+        var updateQuery = {
+            $or:[{taskId: dependentTask.taskId}],
+            graphId: data.graphId,
+            reachable: true
+        };        
+
+        var dbUpdate = {
+            $set: {
+                reachable: false
+            }
+        };
+
+        return mongo.updateUnreachableTasks(data)
+        .then(function() {
+            expect(waterline.taskdependencies.find).to.have.been.calledOnce;
+            expect(waterline.taskdependencies.find).to.have.been.calledWith(queryFind);
+            expect(waterline.taskdependencies.updateMongo).to.have.been.calledWith(
+                updateQuery,
+                dbUpdate,
+                {multi: true}
+            ); 
+        }); 
     });
 
     it('markTaskEvaluated', function() {
@@ -701,20 +941,6 @@ describe('Task Graph mongo store interface', function () {
         });
     });
 
-    it('setIndexes', function() {
-        var indexObject = {
-            taskdependencies: [
-                {taskId: 1, graphId: 1}
-            ]
-        };
-
-        return mongo.setIndexes(indexObject)
-        .then(function() {
-            expect(waterline.taskdependencies.createMongoIndexes).to.be
-                .calledWithExactly({taskId: 1, graphId: 1});
-        });
-    });
-
     it('findChildGraph', function() {
         var runGraphTaskId = uuid.v4();
         return mongo.findChildGraph(runGraphTaskId)
@@ -739,4 +965,5 @@ describe('Task Graph mongo store interface', function () {
                 'testevent', testObj, 'testid');
         });
     });
+
 });

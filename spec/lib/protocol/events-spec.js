@@ -7,13 +7,18 @@ describe("Event protocol subscribers", function () {
     var testSubscription,
         testMessage,
         messenger,
-        events;
+        events,
+        hook;
+
+    var clock;
+    var createTime;
 
     helper.before();
 
     before(function () {
         events = helper.injector.get('Protocol.Events');
         messenger = helper.injector.get('Services.Messenger');
+        hook = helper.injector.get('Services.Hook');
         var Message = helper.injector.get('Message');
         var Subscription = helper.injector.get('Subscription');
 
@@ -22,16 +27,25 @@ describe("Event protocol subscribers", function () {
         sinon.stub(testMessage);
         sinon.stub(messenger, 'request');
         sinon.stub(messenger, 'publish');
+        sinon.stub(hook, 'publish').resolves();
     });
 
     beforeEach(function() {
         messenger.request.reset();
         messenger.publish.reset();
+        hook.publish.reset();
+	    clock = sinon.useFakeTimers(new Date(2011,9,1).getTime());
+	    createTime = new Date();
+    });
+
+    afterEach(function() {
+        clock.restore();
     });
 
     after(function() {
         messenger.request.restore();
         messenger.publish.restore();
+        hook.publish.restore();
     });
 
     helper.after();
@@ -257,21 +271,22 @@ describe("Event protocol subscribers", function () {
             //NOTE: no matching internal code to listen for these events
             var uuid = helper.injector.get('uuid'),
                 graphId = uuid.v4(),
-                data = { test: 'data' };
-            messenger.subscribe = sinon.spy(function(a,b,callback) {
-                callback(data,testMessage);
+                status = 'testStatus',
+                nodeId = 'abc';
+            messenger.subscribe = sinon.spy(function(a, b, callback) {
+                callback({status: status}, testMessage);
                 return Promise.resolve(testSubscription);
             });
             messenger.publish.resolves();
             return events.subscribeGraphStarted(graphId, function (_data) {
-                expect(_data).to.equal(data);
-                return data;
+                expect(_data).to.equal(status);
+                return status;
             }).then(function (subscription) {
                 expect(subscription).to.be.ok;
-                return events.publishGraphStarted(graphId, data);
+                return events.publishGraphStarted(graphId, status, nodeId);
             }).then(function (subscription) {
-                expect(subscription).to.not.be.ok;
-                return events.publishGraphStarted(graphId, undefined);
+                expect(subscription[0]).to.not.be.ok;
+                return Promise.resolve();
             });
         });
     });
@@ -282,7 +297,8 @@ describe("Event protocol subscribers", function () {
             //NOTE: no matching internal code to listen for these events
             var uuid = helper.injector.get('uuid'),
                 graphId = uuid.v4(),
-                status = 'testStatus';
+                status = 'testStatus',
+                nodeId = 'abc';
             messenger.subscribe = sinon.spy(function(a,b,callback) {
                 callback({status:status},testMessage);
                 return Promise.resolve(testSubscription);
@@ -293,7 +309,7 @@ describe("Event protocol subscribers", function () {
                 return status;
             }).then(function (subscription) {
                 expect(subscription).to.be.ok;
-                return events.publishGraphFinished(graphId, status);
+                return events.publishGraphFinished(graphId, status, nodeId);
             });
         });
     });
@@ -349,15 +365,19 @@ describe("Event protocol subscribers", function () {
             testType = 'compute',
             testNodeId,
             testNode = {};
+        var routingKey;
 
         before(function(){
             var uuid = helper.injector.get('uuid');
             testNodeId = uuid.v4();
+            var typeId = testNodeId;
 
             testNode = {
                 id: testNodeId,
                 type: testType
             };
+
+            routingKey = 'node.discovered.information.' + typeId + '.' + testNodeId;
         });
 
         it('should publish without additional data', function(){
@@ -365,14 +385,29 @@ describe("Event protocol subscribers", function () {
 
             return events.publishNodeEvent(testNode, testAction)
             .then(function(){
-                expect(messenger.publish).to.have.been.calledWith(
+                expect(messenger.publish.firstCall).to.have.been.calledWith(
                     'on.events',
-                    'event.node',
+                    routingKey,
                     {
                         type: 'node',
                         action: testAction,
                         nodeId: testNodeId,
-                        nodeType: testType
+                        typeId: testNodeId,
+                        severity: "information",
+                        data: { nodeType: 'compute'},
+                        version:'1.0',
+                        createdAt: createTime
+                    });
+                expect(hook.publish).to.have.been.calledOnce;
+                expect(hook.publish).to.have.been.calledWith({
+                        type: 'node',
+                        action: testAction,
+                        nodeId: testNodeId,
+                        typeId: testNodeId,
+                        severity: "information",
+                        data: { nodeType: 'compute'},
+                        version:'1.0',
+                        createdAt: createTime
                     });
             });
         });
@@ -387,15 +422,18 @@ describe("Event protocol subscribers", function () {
 
             return events.publishNodeEvent(testNode, testAction, testData)
             .then(function(){
-                expect(messenger.publish).to.have.been.calledWith(
+                expect(messenger.publish.firstCall).to.have.been.calledWith(
                     'on.events',
-                    'event.node',
+                    routingKey,
                     {
                         type: 'node',
                         action: testAction,
                         nodeId: testNodeId,
-                        nodeType: testType,
-                        data: testData
+                        typeId: testNodeId,
+                        severity: "information",
+                        data: testData,
+                        version:'1.0',
+                        createdAt: createTime
                     });
             });
         });
@@ -406,51 +444,71 @@ describe("Event protocol subscribers", function () {
         it('should publish assigned event', function() {
             var oldNode = {id: 'aaa', type: 'compute', sku: ''};
             var newNode = {id: 'aaa', type: 'compute', sku: 'bbb'};
+            var typeId = oldNode.id;
+            var routingKey = 'node.sku.assigned.information.' + typeId + '.' + oldNode.id;
 
             messenger.publish.resolves();
 
             return events.publishNodeAttrEvent(oldNode, newNode, 'sku')
             .then(function () {
                 expect(messenger.publish).to.have.been
-                .calledWith('on.events', 'event.node',
+                .calledWith('on.events', routingKey,
                     { type: 'node',
                       action: 'sku.assigned',
                       nodeId : 'aaa',
-                      nodeType: 'compute' });
+                      typeId: 'aaa',
+                      severity: "information",
+                      data: { nodeType: 'compute'},
+                      version:'1.0',
+                      createdAt: createTime});
             });
         });
 
         it('should publish unassigned event', function() {
             var oldNode = {id: 'aaa', type: 'compute', sku: 'bbb'};
             var newNode = {id: 'aaa', type: 'compute', sku: ''};
+            var typeId = oldNode.id;
+            var routingKey = 'node.sku.unassigned.information.' + typeId + '.' + oldNode.id;
 
             messenger.publish.resolves();
 
             return events.publishNodeAttrEvent(oldNode, newNode, 'sku')
             .then(function () {
                 expect(messenger.publish).to.have.been
-                .calledWith('on.events', 'event.node',
+                .calledWith('on.events', routingKey,
                     { type: 'node',
                       action: 'sku.unassigned',
                       nodeId : 'aaa',
-                      nodeType: 'compute' });
+                      typeId: 'aaa',
+                      severity: "information",
+                      data: { nodeType: 'compute'},
+                      version:'1.0',
+                      createdAt: createTime
+                     });
             });
         });
 
         it('should publish updated event', function() {
             var oldNode = {id: 'aaa', type: 'compute', sku: 'bbb'};
             var newNode = {id: 'aaa', type: 'compute', sku: 'ccc'};
+            var typeId = oldNode.id;
+            var routingKey = 'node.sku.updated.information.' + typeId + '.' + oldNode.id;
 
             messenger.publish.resolves();
 
             return events.publishNodeAttrEvent(oldNode, newNode, 'sku')
             .then(function () {
                 expect(messenger.publish).to.have.been
-                .calledWith('on.events', 'event.node',
+                .calledWith('on.events', routingKey,
                     { type: 'node',
                       action: 'sku.updated',
                       nodeId : 'aaa',
-                      nodeType: 'compute' });
+                      typeId: 'aaa',
+                      severity: "information",
+                      data: { nodeType: 'compute'},
+                      version:'1.0',
+                      createdAt: createTime
+                    });
             });
         });
 
@@ -478,4 +536,87 @@ describe("Event protocol subscribers", function () {
             });
         });
     });
+
+    describe("publish graph progress event", function () {
+        it("should publish graph progress event", function () {
+            var uuid = helper.injector.get('uuid');
+            var nodeId = "aaa";
+            var type = 'graph';
+            var action = 'progress.updated';
+            var data = {
+                graphId: uuid.v4(),
+                nodeId: nodeId,
+                progress: {
+                    "percentage": "10%",
+                    "description": "anything"
+                },
+                taskProgress: {
+                    taskId: "anything"
+                }
+            };
+
+            var eventData = {
+                type: type,
+                action: action,
+                nodeId : nodeId,
+                typeId: data.graphId,
+                severity: "information",
+                data: data,
+                version:'1.0',
+                createdAt: createTime
+            };
+            messenger.publish.resolves();
+            return events.publishProgressEvent(data.graphId, data)
+            .then(function () {
+                expect(messenger.publish).to.be.calledWith(
+                    'on.events',
+                    type + '.' + action + '.information.' + data.graphId + '.' + nodeId,
+                    eventData);
+            });
+        });
+
+    });
+
+    describe("publish heartbeat event", function () {
+        it("should publish heartbeat event", function () {
+            var eventTypeId = 'rackhd.on-tftp';
+            var data = {};
+
+            var eventData = {
+                type: 'heartbeat',
+                action: 'updated',
+                nodeId : null,
+                typeId: eventTypeId,
+                severity: "information",
+                data: data,
+                version:'1.0',
+                createdAt: createTime
+            };
+            messenger.publish.resolves();
+            return events.publishHeartbeatEvent(eventTypeId, data)
+            .then(function () {
+                expect(messenger.publish.firstCall).to.have.been.calledWith(
+                    'on.events',
+                    'heartbeat.updated.information.' + eventTypeId,
+                    eventData);
+            });
+        });
+    });
+
+    describe("subscribe SEL event", function () {
+        it("should subscrbe SEl event", function () {
+            var nodeId = "507f191e810c19729de860ea";
+            var pollerId = "507f191e810c19729de860ea";
+            var callbackStub = sinon.stub();
+            return events.subscribeSelEvent('information', pollerId, nodeId, callbackStub)
+            .then(function(){
+                expect(messenger.subscribe).to.have.been.calledWith(
+                    'on.events',
+                    'polleralert.sel.updated.information.' + pollerId + '.' + nodeId,
+                    callbackStub
+                );
+            });
+        });
+    });
+
 });

@@ -1,4 +1,4 @@
-// Copyright 2016, EMC, Inc.
+// Copyright © 2016-2017 Dell Inc. or its subsidiaries.  All Rights Reserved.
 
 'use strict';
 
@@ -7,6 +7,7 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
     var eventsProtocol;
     var taskGraphRunnerProtocol;
     var amqp;
+    var waterline;
     var configuration = {
         get: sinon.stub().withArgs('taskgraph-messenger').returns('AMQP')
     };
@@ -18,12 +19,18 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
     };
     var eventsProtocolMock = {
         subscribeTaskFinished: sinon.stub().resolves(),
-        publishTaskFinished: sinon.stub().resolves()
+        publishTaskFinished: sinon.stub().resolves(),
+        publishProgressEvent: sinon.stub().resolves()
     };
     var taskGraphRunnerProtocolMock = {
         subscribeRunTaskGraph: sinon.stub().resolves(),
         subscribeCancelTaskGraph: sinon.stub().resolves(),
         cancelTaskGraph: sinon.stub().resolves()
+    };
+    var waterlineMock = {
+        graphobjects: {
+            findOne: sinon.stub()
+        }
     };
 
     before(function() {
@@ -33,11 +40,13 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
             helper.di.simpleWrapper(taskProtocolMock, 'Protocol.Task'),
             helper.di.simpleWrapper(eventsProtocolMock, 'Protocol.Events'),
             helper.di.simpleWrapper(taskGraphRunnerProtocolMock, 'Protocol.TaskGraphRunner'),
+            helper.di.simpleWrapper(waterlineMock, 'Services.Waterline')
         ]);
         taskProtocol = helper.injector.get('Protocol.Task');
         eventsProtocol = helper.injector.get('Protocol.Events');
         taskGraphRunnerProtocol = helper.injector.get('Protocol.TaskGraphRunner');
         amqp = helper.injector.get('Task.Messengers.AMQP');
+        waterline = helper.injector.get('Services.Waterline');
     });
 
     afterEach(function() {
@@ -102,12 +111,28 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
     });
 
     it('should wrap the events protocol publishTaskFinished method', function() {
-        return amqp.publishTaskFinished(
-            'default', 'testtaskid', 'testgraphid', 'succeeded', null, ['failed', 'timeout'])
+        var task = {
+            instanceId: 'testtaskid',
+            state: 'succeeded',
+            context: {
+                graphId: 'testgraphid',
+            },
+            definition: {
+                terminalOnStates: ['failed', 'timeout']
+            },
+            error: 'error message'
+        };
+        return amqp.publishTaskFinished('default', task)
         .then(function() {
             expect(eventsProtocol.publishTaskFinished).to.have.been.calledOnce;
             expect(eventsProtocol.publishTaskFinished).to.have.been.calledWith(
-                'default', 'testtaskid', 'testgraphid', 'succeeded', null, ['failed', 'timeout']
+                'default',
+                'testtaskid',
+                'testgraphid',
+                'succeeded',
+                'error message',
+                {graphId: 'testgraphid' },
+                ['failed', 'timeout']
             );
         });
     });
@@ -142,5 +167,64 @@ describe('Task/TaskGraph AMQP messenger plugin', function () {
 
     it('should return a promise from start method', function() {
         return expect(amqp.start()).to.be.fulfilled;
+    });
+
+    describe('publishTaskFinished', function() {
+        var finishedTask;
+        before(function() {
+            finishedTask = {
+                instanceId: 'aTaskId',
+                context: { graphId: 'aGraphId'},
+                state: 'finished',
+                definition: { terminalOnStates: ['succeeded'], friendlyName: 'Test Task' }};
+        });
+
+        it('should wrap the events protocol publishTaskFinished method', function() {
+            eventsProtocol.publishTaskFinished = sinon.stub().resolves();
+            return amqp.publishTaskFinished('default', finishedTask)
+            .then(function() {
+                expect(eventsProtocol.publishTaskFinished).to.have.been.calledOnce;
+                expect(eventsProtocol.publishTaskFinished).to.have.been.calledWith(
+                    'default',
+                    finishedTask.instanceId,
+                    finishedTask.context.graphId,
+                    finishedTask.state,
+                    undefined,
+                    finishedTask.context,
+                    finishedTask.definition.terminalOnStates
+                );
+            });
+        });
+
+        it('should call publishTaskFinished with an error message string', function() {
+            eventsProtocol.publishTaskFinished = sinon.stub().resolves();
+            finishedTask.error = new Error('test error');
+            return amqp.publishTaskFinished('default', finishedTask)
+            .then(function() {
+                expect(eventsProtocol.publishTaskFinished).to.have.been.calledOnce;
+                expect(eventsProtocol.publishTaskFinished.firstCall.args[4])
+                    .to.contain('test error');
+            });
+        });
+
+        it('should call publishTaskFinished with an Rx error stack string', function() {
+            eventsProtocol.publishTaskFinished = sinon.stub().resolves();
+            eventsProtocol.publishProgressEvent = sinon.stub().resolves();
+            var error = new Error('test error');
+            error.stack = error.toString();
+            var finishedTask = {
+                taskId: 'aTaskId',
+                context: { graphId: 'aGraphId'},
+                state: 'finished',
+                error: error,
+                definition: { terminalOnStates: ['succeeded'] }
+            };
+
+            return amqp.publishTaskFinished('default', finishedTask)
+            .then(function() {
+                expect(eventsProtocol.publishTaskFinished).to.have.been.calledOnce;
+                expect(eventsProtocol.publishTaskFinished.firstCall.args[4]).to.equal(error.stack);
+            });
+        });
     });
 });
